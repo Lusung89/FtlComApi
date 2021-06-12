@@ -1,0 +1,2 @@
+#define FTLCOMAPI_API __declspec(dllexport)
+#define FTLCOMAPI_API __declspec(dllimport)

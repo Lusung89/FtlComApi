@@ -1,0 +1,1305 @@
+/////////////////////////////////  Includes  //////////////////////////////////
+
+#include "stdafx.h"
+#include "SerialPort.h"
+#ifndef _WINERROR_
+#pragma message("To avoid this message, please put WinError.h in your PCH (normally stdafx.h)")
+#include <WinError.h>
+#endif
+
+
+///////////////////////////////// Defines /////////////////////////////////////
+
+#ifdef _DEBUG
+#define new DEBUG_NEW
+#undef THIS_FILE
+static char THIS_FILE[] = __FILE__;
+#endif
+
+
+//////////////////////////////// Implementation ///////////////////////////////
+
+BOOL CSerialException::GetErrorMessage(LPTSTR lpszError, UINT nMaxError, PUINT pnHelpContext)
+{
+  //Validate our parameters
+	ASSERT(lpszError != NULL && AfxIsValidString(lpszError, nMaxError));
+	if (lpszError == NULL || nMaxError == 0)
+		return FALSE;
+	if (pnHelpContext != NULL)
+		*pnHelpContext = 0;
+
+	LPTSTR lpBuffer;
+	BOOL bRet = FormatMessage(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM,
+			                      NULL,  m_dwError, MAKELANGID(LANG_NEUTRAL, SUBLANG_SYS_DEFAULT),
+			                      reinterpret_cast<LPTSTR>(&lpBuffer), 0, NULL);
+
+	if (bRet == FALSE)
+		*lpszError = '\0';
+	else
+	{
+	#if (_MSC_VER >= 1400)
+	  _tcsncpy_s(lpszError, nMaxError, lpBuffer, _TRUNCATE);
+  #else
+	  lstrcpyn(lpszError, lpBuffer, nMaxError-1);
+	  lpszError[nMaxError-1] = '\0';
+  #endif
+		bRet = TRUE;
+
+		LocalFree(lpBuffer);
+	}
+
+	return bRet;
+}
+
+CString CSerialException::GetErrorMessage()
+{
+  CString rVal;
+  LPTSTR pstrError = rVal.GetBuffer(4096);
+  GetErrorMessage(pstrError, 4096, NULL);
+  rVal.ReleaseBuffer();
+  return rVal;
+}
+
+CSerialException::CSerialException(DWORD dwError)
+{
+	m_dwError = dwError;
+}
+
+IMPLEMENT_DYNAMIC(CSerialException, CException)
+
+#ifdef _DEBUG
+void CSerialException::Dump(CDumpContext& dc) const
+{
+	CObject::Dump(dc);
+
+	dc << "m_dwError = " << m_dwError;
+}
+#endif
+
+
+CSerialPort::CSerialPort() : m_hComm(INVALID_HANDLE_VALUE),
+                             m_hEvent(NULL)
+{
+  m_hKernel32 = GetModuleHandle(_T("KERNEL32.DLL"));
+  VERIFY(m_hKernel32 != NULL);
+  m_lpfnCancelIo = (LPCANCELIO) GetProcAddress(m_hKernel32, "CancelIo");
+}
+
+CSerialPort::~CSerialPort()
+{
+  Close();
+}
+
+void CSerialPort::ThrowSerialException(DWORD dwError /*= 0*/)
+{
+	if (dwError == 0)
+		dwError = ::GetLastError();
+
+	CSerialException* pException = new CSerialException (dwError);
+
+	TRACE(_T("Warning: throwing CSerialException for error %d\n"), dwError);
+	THROW(pException);
+}
+
+#ifdef _DEBUG
+void CSerialPort::Dump(CDumpContext& dc) const
+{
+	dc << _T("m_hComm = ") << m_hComm << _T("\n");
+}
+#endif
+
+void CSerialPort::Open(int nPort, DWORD dwBaud, Parity parity, BYTE DataBits, StopBits stopbits, FlowControl fc, BOOL bOverlapped)
+{
+  //Validate our parameters
+  ASSERT(nPort>0 && nPort<=255);
+
+  Close(); //In case we are already open
+
+  //Call CreateFile to open the comms port
+  CString sPort;
+  sPort.Format(_T("\\\\.\\COM%d"), nPort);
+  m_hComm = CreateFile(sPort, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, bOverlapped ? FILE_FLAG_OVERLAPPED : 0, NULL);
+  if (m_hComm == INVALID_HANDLE_VALUE)
+  {
+    TRACE(_T("CSerialPort::Open, Failed to open the comms port\n"));
+    ThrowSerialException();
+  }
+
+  //Create the event we need for later synchronisation use
+  m_hEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
+  if (m_hEvent == NULL)
+  {
+    Close();
+    TRACE(_T("CSerialPort::Open, Failed in call to CreateEvent in Open\n"));
+    ThrowSerialException();
+  }
+ 
+  //Get the current state prior to changing it
+  DCB dcb;
+  dcb.DCBlength = sizeof(DCB);
+  GetState(dcb);
+
+  //Setup the baud rate
+  dcb.BaudRate = dwBaud;
+
+  //Setup the Parity
+  switch (parity)
+  {
+    case EvenParity:  dcb.Parity = EVENPARITY;  break;
+    case MarkParity:  dcb.Parity = MARKPARITY;  break;
+    case NoParity:    dcb.Parity = NOPARITY;    break;
+    case OddParity:   dcb.Parity = ODDPARITY;   break;
+    case SpaceParity: dcb.Parity = SPACEPARITY; break;
+    default:          ASSERT(FALSE);            break;
+  }
+
+  //Setup the data bits
+  dcb.ByteSize = DataBits;
+
+  //Setup the stop bits
+  switch (stopbits)
+  {
+    case OneStopBit:           dcb.StopBits = ONESTOPBIT;   break;
+    case OnePointFiveStopBits: dcb.StopBits = ONE5STOPBITS; break;
+    case TwoStopBits:          dcb.StopBits = TWOSTOPBITS;  break;
+    default:                   ASSERT(FALSE);               break;
+  }
+
+  //Setup the flow control
+  dcb.fDsrSensitivity = FALSE;
+  switch (fc)
+  {
+    case NoFlowControl:
+    {
+      dcb.fOutxCtsFlow = FALSE;
+      dcb.fOutxDsrFlow = FALSE;
+      dcb.fOutX = FALSE;
+      dcb.fInX = FALSE;
+      break;
+    }
+    case CtsRtsFlowControl:
+    {
+      dcb.fOutxCtsFlow = TRUE;
+      dcb.fOutxDsrFlow = FALSE;
+      dcb.fRtsControl = RTS_CONTROL_HANDSHAKE;
+      dcb.fOutX = FALSE;
+      dcb.fInX = FALSE;
+      break;
+    }
+    case CtsDtrFlowControl:
+    {
+      dcb.fOutxCtsFlow = TRUE;
+      dcb.fOutxDsrFlow = FALSE;
+      dcb.fDtrControl = DTR_CONTROL_HANDSHAKE;
+      dcb.fOutX = FALSE;
+      dcb.fInX = FALSE;
+      break;
+    }
+    case DsrRtsFlowControl:
+    {
+      dcb.fOutxCtsFlow = FALSE;
+      dcb.fOutxDsrFlow = TRUE;
+      dcb.fRtsControl = RTS_CONTROL_HANDSHAKE;
+      dcb.fOutX = FALSE;
+      dcb.fInX = FALSE;
+      break;
+    }
+    case DsrDtrFlowControl:
+    {
+      dcb.fOutxCtsFlow = FALSE;
+      dcb.fOutxDsrFlow = TRUE;
+      dcb.fDtrControl = DTR_CONTROL_HANDSHAKE;
+      dcb.fOutX = FALSE;
+      dcb.fInX = FALSE;
+      break;
+    }
+    case XonXoffFlowControl:
+    {
+      dcb.fOutxCtsFlow = FALSE;
+      dcb.fOutxDsrFlow = FALSE;
+      dcb.fOutX = TRUE;
+      dcb.fInX = TRUE;
+      dcb.XonChar = 0x11;
+      dcb.XoffChar = 0x13;
+      dcb.XoffLim = 100;
+      dcb.XonLim = 100;
+      break;
+    }
+    default:
+    {
+      ASSERT(FALSE);
+      break;
+    }
+  }
+ 
+  //Now that we have all the settings in place, make the changes
+  SetState(dcb);
+}
+
+void CSerialPort::Close()
+{
+  if (IsOpen())
+  {
+    //Close down the comms port
+    BOOL bSuccess = CloseHandle(m_hComm);
+    m_hComm = INVALID_HANDLE_VALUE;
+    if (!bSuccess)
+      TRACE(_T("CSerialPort::Close, Failed to close up the comms port, GetLastError:%d\n"), GetLastError());
+
+    //Free the event object we are using
+    if (m_hEvent)
+    {
+      CloseHandle(m_hEvent);
+      m_hEvent = NULL;
+    }
+  }
+}
+
+void CSerialPort::Attach(HANDLE hComm)
+{
+  Close();
+
+  //Validate our parameters, now that the port has been closed
+  ASSERT(m_hComm == INVALID_HANDLE_VALUE);
+  ASSERT(m_hEvent == NULL);
+
+  m_hComm = hComm; 
+
+  //Create the event we need for later synchronisation use
+  m_hEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
+  if (m_hEvent == NULL)
+  {
+    DWORD dwError = GetLastError();
+    Close();
+    TRACE(_T("CSerialPort::Attach, Failed in call to CreateEvent in Attach\n"));
+    ThrowSerialException(dwError);
+  }
+}
+
+HANDLE CSerialPort::Detach()
+{
+  //What will be the return value from this function
+  HANDLE hrVal = m_hComm;
+
+  m_hComm = INVALID_HANDLE_VALUE;
+
+  if (m_hEvent)
+  {
+    CloseHandle(m_hEvent);
+    m_hEvent = NULL;
+  }
+
+  return hrVal;
+}
+
+DWORD CSerialPort::Read(void* lpBuf, DWORD dwCount)
+{
+  ASSERT(IsOpen());
+
+  DWORD dwBytesRead = 0;
+  if (!ReadFile(m_hComm, lpBuf, dwCount, &dwBytesRead, NULL))
+  {
+    TRACE(_T("CSerialPort::Read, Failed in call to ReadFile\n"));
+    ThrowSerialException();
+  }
+
+  return dwBytesRead;
+}
+
+BOOL CSerialPort::Read(void* lpBuf, DWORD dwCount, OVERLAPPED& overlapped, DWORD* pBytesRead)
+{
+  ASSERT(IsOpen());
+
+  DWORD dwBytesRead = 0;
+  BOOL bSuccess = ReadFile(m_hComm, lpBuf, dwCount, &dwBytesRead, &overlapped);
+  if (!bSuccess)
+  {
+    if (GetLastError() != ERROR_IO_PENDING)
+    {
+      TRACE(_T("CSerialPort::Read, Failed in call to ReadFile\n"));
+      ThrowSerialException();
+    }
+  }
+  else
+  {
+    if (pBytesRead)
+      *pBytesRead = dwBytesRead;
+  }
+  return bSuccess;
+}
+
+DWORD CSerialPort::Write(const void* lpBuf, DWORD dwCount)
+{
+  ASSERT(IsOpen());
+
+  DWORD dwBytesWritten = 0;
+  if (!WriteFile(m_hComm, lpBuf, dwCount, &dwBytesWritten, NULL))
+  {
+    TRACE(_T("CSerialPort::Write, Failed in call to WriteFile\n"));
+    ThrowSerialException();
+  }
+
+  return dwBytesWritten;
+}
+
+BOOL CSerialPort::Write(const void* lpBuf, DWORD dwCount, OVERLAPPED& overlapped, DWORD* pBytesWritten)
+{
+  ASSERT(IsOpen());
+
+  DWORD dwBytesWritten = 0;
+  BOOL bSuccess = WriteFile(m_hComm, lpBuf, dwCount, &dwBytesWritten, &overlapped);
+  if (!bSuccess)
+  {
+    if (GetLastError() != ERROR_IO_PENDING)
+    {
+      TRACE(_T("CSerialPort::Write, Failed in call to WriteFile\n"));
+      ThrowSerialException();
+    }
+  }
+  else
+  {
+    if (pBytesWritten)
+      *pBytesWritten = dwBytesWritten;
+  }
+
+  return bSuccess;
+}
+
+void CSerialPort::GetOverlappedResult(OVERLAPPED& overlapped, DWORD& dwBytesTransferred, BOOL bWait)
+{
+  ASSERT(IsOpen());
+
+  if (!::GetOverlappedResult(m_hComm, &overlapped, &dwBytesTransferred, bWait))
+  {
+    if (GetLastError() != ERROR_IO_INCOMPLETE)
+    {
+      TRACE(_T("CSerialPort::GetOverlappedResult, Failed in call to GetOverlappedResult\n"));
+      ThrowSerialException();
+    }
+  }
+}
+
+void CSerialPort::_OnCompletion(DWORD dwErrorCode, DWORD dwCount, LPOVERLAPPED lpOverlapped)
+{
+  //Validate our parameters
+  ASSERT(lpOverlapped);
+
+  //Convert back to the C++ world
+  CSerialPort* pSerialPort = static_cast<CSerialPort*>(lpOverlapped->hEvent);
+  ASSERT(pSerialPort);
+
+  //Call the C++ function
+  pSerialPort->OnCompletion(dwErrorCode, dwCount, lpOverlapped);
+}
+
+void CSerialPort::OnCompletion(DWORD /*dwErrorCode*/, DWORD /*dwCount*/, LPOVERLAPPED lpOverlapped)
+{
+  //Just free the memory which was previously allocated for the OVERLAPPED structure
+  delete lpOverlapped;
+
+  //Your derived classes can do something useful in OnCompletion, but don't forget to
+  //call CSerialPort::OnCompletion to ensure the memory is freed
+}
+
+void CSerialPort::CancelIo()
+{
+  ASSERT(IsOpen());
+
+  if (m_lpfnCancelIo == NULL)
+  {
+    TRACE(_T("CSerialPort::CancelIo, CancelIo function is not supported on this OS. You need to be running at least NT 4 or Win 98 to use this function\n"));
+    ThrowSerialException(ERROR_CALL_NOT_IMPLEMENTED); 
+  }
+
+  if (!m_lpfnCancelIo(m_hComm))
+  {
+    TRACE(_T("Failed in call to CancelIO\n"));
+    ThrowSerialException();
+  }
+}
+
+DWORD CSerialPort::BytesWaiting()
+{
+  ASSERT(IsOpen());
+
+  //Check to see how many characters are unread
+  COMSTAT stat;
+  GetStatus(stat);
+  return stat.cbInQue;
+}
+
+BOOL CSerialPort::DataWaiting(DWORD dwTimeout)
+{
+  ASSERT(IsOpen());
+
+  //Setup to wait for incoming data
+  DWORD dwOldMask;
+  GetMask(dwOldMask);
+  SetMask(EV_RXCHAR);
+
+  //Setup the overlapped structure
+  OVERLAPPED o;
+  o.hEvent = m_hEvent;
+
+  //Assume the worst;
+  BOOL bSuccess = FALSE;
+
+  DWORD dwEvent;
+  bSuccess = WaitEvent(dwEvent, o);
+  if (!bSuccess)
+  {
+    if (WaitForSingleObject(o.hEvent, dwTimeout) == WAIT_OBJECT_0)
+    {
+      DWORD dwBytesTransferred;
+      GetOverlappedResult(o, dwBytesTransferred, FALSE);
+      bSuccess = TRUE;
+    }
+  }
+
+  //Reset the event mask
+  SetMask(dwOldMask);
+
+  return bSuccess;
+}
+
+void CSerialPort::WriteEx(const void* lpBuf, DWORD dwCount)
+{
+  ASSERT(IsOpen());
+
+  OVERLAPPED* pOverlapped = new OVERLAPPED;
+  ZeroMemory(pOverlapped, sizeof(OVERLAPPED));
+  pOverlapped->hEvent = static_cast<HANDLE>(this);
+  if (!WriteFileEx(m_hComm, lpBuf, dwCount, pOverlapped, _OnCompletion))
+  {
+    delete pOverlapped;
+    TRACE(_T("CSerialPort::WriteEx, Failed in call to WriteFileEx\n"));
+    ThrowSerialException();
+  }
+}
+
+void CSerialPort::ReadEx(void* lpBuf, DWORD dwCount)
+{
+  ASSERT(IsOpen());
+
+  OVERLAPPED* pOverlapped = new OVERLAPPED;
+  ZeroMemory(pOverlapped, sizeof(OVERLAPPED));
+  pOverlapped->hEvent = static_cast<HANDLE>(this);
+  if (!ReadFileEx(m_hComm, lpBuf, dwCount, pOverlapped, _OnCompletion))
+  {
+    delete pOverlapped;
+    TRACE(_T("CSerialPort::ReadEx, Failed in call to ReadFileEx\n"));
+    ThrowSerialException();
+  }
+}
+
+void CSerialPort::TransmitChar(char cChar)
+{
+  ASSERT(IsOpen());
+
+  if (!TransmitCommChar(m_hComm, cChar))
+  {
+    TRACE(_T("CSerialPort::TransmitChar, Failed in call to TransmitCommChar\n"));
+    ThrowSerialException();
+  }
+}
+
+void CSerialPort::GetConfig(COMMCONFIG& config)
+{
+  ASSERT(IsOpen());
+
+  DWORD dwSize = sizeof(COMMCONFIG);
+  if (!GetCommConfig(m_hComm, &config, &dwSize))
+  {
+    TRACE(_T("CSerialPort::GetConfig, Failed in call to GetCommConfig\n"));
+    ThrowSerialException();
+  }
+}
+
+void CSerialPort::SetConfig(COMMCONFIG& config)
+{
+  ASSERT(IsOpen());
+
+  DWORD dwSize = sizeof(COMMCONFIG);
+  if (!SetCommConfig(m_hComm, &config, dwSize))
+  {
+    TRACE(_T("CSerialPort::SetConfig, Failed in call to SetCommConfig\n"));
+    ThrowSerialException();
+  }
+}
+
+void CSerialPort::SetBreak()
+{
+  ASSERT(IsOpen());
+
+  if (!SetCommBreak(m_hComm))
+  {
+    TRACE(_T("CSerialPort::SetBreak, Failed in call to SetCommBreak\n"));
+    ThrowSerialException();
+  }
+}
+
+void CSerialPort::ClearBreak()
+{
+  ASSERT(IsOpen());
+
+  if (!ClearCommBreak(m_hComm))
+  {
+    TRACE(_T("CSerialPort::ClearBreak, Failed in call to SetCommBreak\n"));
+    ThrowSerialException();
+  }
+}
+
+void CSerialPort::ClearError(DWORD& dwErrors)
+{
+  ASSERT(IsOpen());
+
+  if (!ClearCommError(m_hComm, &dwErrors, NULL))
+  {
+    TRACE(_T("CSerialPort::ClearError, Failed in call to ClearCommError\n"));
+    ThrowSerialException();
+  }
+}
+
+void CSerialPort::GetDefaultConfig(int nPort, COMMCONFIG& config)
+{
+  //Validate our parameters
+  ASSERT(nPort>0 && nPort<=255);
+
+  //Create the device name as a string
+  CString sPort;
+  sPort.Format(_T("COM%d"), nPort);
+
+  DWORD dwSize = sizeof(COMMCONFIG);
+  if (!GetDefaultCommConfig(sPort, &config, &dwSize))
+  {
+    TRACE(_T("CSerialPort::GetDefaultConfig, Failed in call to GetDefaultCommConfig\n"));
+    ThrowSerialException();
+  }
+}
+
+void CSerialPort::SetDefaultConfig(int nPort, COMMCONFIG& config)
+{
+  //Validate our parameters
+  ASSERT(nPort>0 && nPort<=255);
+
+  //Create the device name as a string
+  CString sPort;
+  sPort.Format(_T("COM%d"), nPort);
+
+  DWORD dwSize = sizeof(COMMCONFIG);
+  if (!SetDefaultCommConfig(sPort, &config, dwSize))
+  {
+    TRACE(_T("CSerialPort::SetDefaultConfig, Failed in call to SetDefaultCommConfig\n"));
+    ThrowSerialException();
+  }
+}
+
+void CSerialPort::GetStatus(COMSTAT& stat)
+{
+  ASSERT(IsOpen());
+
+  DWORD dwErrors;
+  if (!ClearCommError(m_hComm, &dwErrors, &stat))
+  {
+    TRACE(_T("CSerialPort::GetStatus, Failed in call to ClearCommError\n"));
+    ThrowSerialException();
+  }
+}
+
+void CSerialPort::GetState(DCB& dcb)
+{
+  ASSERT(IsOpen());
+
+  if (!GetCommState(m_hComm, &dcb))
+  {
+    TRACE(_T("CSerialPort::GetState, Failed in call to GetCommState\n"));
+    ThrowSerialException();
+  }
+}
+
+void CSerialPort::SetState(DCB& dcb)
+{
+  ASSERT(IsOpen());
+
+  if (!SetCommState(m_hComm, &dcb))
+  {
+    TRACE(_T("CSerialPort::SetState, Failed in call to SetCommState\n"));
+    ThrowSerialException();
+  }
+}
+
+void CSerialPort::Escape(DWORD dwFunc)
+{
+  ASSERT(IsOpen());
+
+  if (!EscapeCommFunction(m_hComm, dwFunc))
+  {
+    TRACE(_T("CSerialPort::Escape, Failed in call to EscapeCommFunction\n"));
+    ThrowSerialException();
+  }
+}
+
+void CSerialPort::ClearDTR()
+{
+  Escape(CLRDTR);
+}
+
+void CSerialPort::ClearRTS()
+{
+  Escape(CLRRTS);
+}
+
+void CSerialPort::SetDTR()
+{
+  Escape(SETDTR);
+}
+
+void CSerialPort::SetRTS()
+{
+  Escape(SETRTS);
+}
+
+void CSerialPort::SetXOFF()
+{
+  Escape(SETXOFF);
+}
+
+void CSerialPort::SetXON()
+{
+  Escape(SETXON);
+}
+
+void CSerialPort::GetProperties(COMMPROP& properties)
+{
+  ASSERT(IsOpen());
+
+  if (!GetCommProperties(m_hComm, &properties))
+  {
+    TRACE(_T("CSerialPort::GetProperties, Failed in call to GetCommProperties\n"));
+    ThrowSerialException();
+  }
+}
+
+void CSerialPort::GetModemStatus(DWORD& dwModemStatus)
+{
+  ASSERT(IsOpen());
+
+  if (!GetCommModemStatus(m_hComm, &dwModemStatus))
+  {
+    TRACE(_T("CSerialPort::GetModemStatus, Failed in call to GetCommModemStatus\n"));
+    ThrowSerialException();
+  }
+}
+
+void CSerialPort::SetMask(DWORD dwMask)
+{
+  ASSERT(IsOpen());
+
+  if (!SetCommMask(m_hComm, dwMask))
+  {
+    TRACE(_T("CSerialPort::SetMask, Failed in call to SetCommMask\n"));
+    ThrowSerialException();
+  }
+}
+
+void CSerialPort::GetMask(DWORD& dwMask)
+{
+  ASSERT(IsOpen());
+
+  if (!GetCommMask(m_hComm, &dwMask))
+  {
+    TRACE(_T("CSerialPort::GetMask, Failed in call to GetCommMask\n"));
+    ThrowSerialException();
+  }
+}
+
+void CSerialPort::Flush()
+{
+  ASSERT(IsOpen());
+
+  if (!FlushFileBuffers(m_hComm))
+  {
+    TRACE(_T("CSerialPort::Flush, Failed in call to FlushFileBuffers\n"));
+    ThrowSerialException();
+  }
+}
+
+void CSerialPort::Purge(DWORD dwFlags)
+{
+  ASSERT(IsOpen());
+
+  if (!PurgeComm(m_hComm, dwFlags))
+  {
+    TRACE(_T("CSerialPort::Purge, Failed in call to PurgeComm\n"));
+    ThrowSerialException();
+  }
+}
+
+void CSerialPort::TerminateOutstandingWrites()
+{
+  Purge(PURGE_TXABORT);
+}
+
+void CSerialPort::TerminateOutstandingReads()
+{
+  Purge(PURGE_RXABORT);
+}
+
+void CSerialPort::ClearWriteBuffer()
+{
+  Purge(PURGE_TXCLEAR);
+}
+
+void CSerialPort::ClearReadBuffer()
+{
+  Purge(PURGE_RXCLEAR);
+}
+
+void CSerialPort::Setup(DWORD dwInQueue, DWORD dwOutQueue)
+{
+  ASSERT(IsOpen());
+
+  if (!SetupComm(m_hComm, dwInQueue, dwOutQueue))
+  {
+    TRACE(_T("CSerialPort::Setup, Failed in call to SetupComm\n"));
+    ThrowSerialException();
+  }
+}
+
+void CSerialPort::SetTimeouts(COMMTIMEOUTS& timeouts)
+{
+  ASSERT(IsOpen());
+
+  if (!SetCommTimeouts(m_hComm, &timeouts))
+  {
+    TRACE(_T("CSerialPort::SetTimeouts, Failed in call to SetCommTimeouts\n"));
+    ThrowSerialException();
+  }
+}
+
+void CSerialPort::GetTimeouts(COMMTIMEOUTS& timeouts)
+{
+  ASSERT(IsOpen());
+
+  if (!GetCommTimeouts(m_hComm, &timeouts))
+  {
+    TRACE(_T("CSerialPort::GetTimeouts, Failed in call to GetCommTimeouts\n"));
+    ThrowSerialException();
+  }
+}
+
+void CSerialPort::Set0Timeout()
+{
+  COMMTIMEOUTS Timeouts;
+  ZeroMemory(&Timeouts, sizeof(COMMTIMEOUTS));
+  Timeouts.ReadIntervalTimeout = MAXDWORD;
+  SetTimeouts(Timeouts);
+}
+
+void CSerialPort::Set0WriteTimeout()
+{
+  COMMTIMEOUTS Timeouts;
+  GetTimeouts(Timeouts);
+  Timeouts.WriteTotalTimeoutMultiplier = 0;
+  Timeouts.WriteTotalTimeoutConstant = 0;
+  SetTimeouts(Timeouts);
+}
+
+void CSerialPort::Set0ReadTimeout()
+{
+  COMMTIMEOUTS Timeouts;
+  GetTimeouts(Timeouts);
+  Timeouts.ReadIntervalTimeout = MAXDWORD;
+  Timeouts.ReadTotalTimeoutMultiplier = 0;
+  Timeouts.ReadTotalTimeoutConstant = 0;
+  SetTimeouts(Timeouts);
+}
+
+void CSerialPort::WaitEvent(DWORD& dwMask)
+{
+  ASSERT(IsOpen());
+
+  if (!WaitCommEvent(m_hComm, &dwMask, NULL))
+  {
+    TRACE(_T("CSerialPort::WaitEvent, Failed in call to WaitCommEvent\n"));
+    ThrowSerialException();
+  }
+}
+
+BOOL CSerialPort::WaitEvent(DWORD& dwMask, OVERLAPPED& overlapped)
+{
+  ASSERT(IsOpen());
+  ASSERT(overlapped.hEvent);
+
+  BOOL bSuccess = WaitCommEvent(m_hComm, &dwMask, &overlapped);
+  if (!bSuccess)
+  {
+    if (GetLastError() != ERROR_IO_PENDING)
+    {
+      TRACE(_T("CSerialPort::WaitEvent, Failed in call to WaitCommEvent\n"));
+      ThrowSerialException();
+    }
+  }
+
+  return bSuccess;
+}
+
+
+
+
+CodeSelect
+
+/*
+Module : SerialPort.H
+Purpose: Interface for an MFC wrapper class for serial ports
+
+Copyright (c) 1999 - 2007 by PJ Naughter. 
+
+All rights reserved.
+
+Copyright / Usage Details:
+
+You are allowed to include the source code in any product (commercial, shareware, freeware or otherwise)
+when your product is released in binary form. You are allowed to modify the source code in any way you want
+except you cannot modify the copyright details at the top of each module. If you want to distribute source
+code with your application, then you are only allowed to distribute versions released by the author. This is
+to maintain a single distribution point for the source code.
+
+*/
+
+
+///////////////////// Macros / Structs etc //////////////////////////
+
+#ifndef __SERIALPORT_H__
+#define __SERIALPORT_H__
+
+#ifndef CSERIALPORT_EXT_CLASS
+#define CSERIALPORT_EXT_CLASS
+#endif
+
+#ifndef CSERIALPORT_EXT_API
+#define CSERIALPORT_EXT_API
+#endif
+
+
+/////////////////////////// Classes ///////////////////////////////////////////
+
+///////////////// Serial port exception class /////////////////////////////////
+
+class CSERIALPORT_EXT_CLASS CSerialException : public CException
+{
+public:
+//Constructors / Destructors
+	CSerialException(DWORD dwError);
+
+//Methods
+#ifdef _DEBUG
+	virtual void Dump(CDumpContext& dc) const;
+#endif
+	virtual BOOL GetErrorMessage(LPTSTR lpszError, UINT nMaxError, PUINT pnHelpContext = NULL);
+	CString GetErrorMessage();
+
+//Data members
+	DWORD m_dwError;
+
+protected:
+	DECLARE_DYNAMIC(CSerialException)
+};
+
+
+/////////////// The main serial port class ////////////////////////////////////
+
+class CSERIALPORT_EXT_CLASS CSerialPort
+{
+public:
+//Enums
+  enum FlowControl
+  {
+    NoFlowControl,
+    CtsRtsFlowControl,
+    CtsDtrFlowControl,
+    DsrRtsFlowControl,
+    DsrDtrFlowControl,
+    XonXoffFlowControl
+  };
+
+  enum Parity
+  {   
+    EvenParity,
+    MarkParity,
+    NoParity,
+    OddParity,
+    SpaceParity
+  };
+
+  enum StopBits
+  {
+    OneStopBit,
+    OnePointFiveStopBits,
+    TwoStopBits
+  };
+
+//Constructors / Destructors
+  CSerialPort();
+  virtual ~CSerialPort();
+
+//General Methods
+  void Open(int nPort, DWORD dwBaud = 9600, Parity parity = NoParity, BYTE DataBits = 8,
+            StopBits stopbits = OneStopBit, FlowControl fc = NoFlowControl, BOOL bOverlapped = FALSE);
+  void Close();
+  void Attach(HANDLE hComm);
+  HANDLE Detach();
+  operator HANDLE() const { return m_hComm; };
+  BOOL IsOpen() const { return m_hComm != INVALID_HANDLE_VALUE; };
+#ifdef _DEBUG
+  void Dump(CDumpContext& dc) const;
+#endif
+
+//Reading / Writing Methods
+  DWORD Read(void* lpBuf, DWORD dwCount);
+  BOOL  Read(void* lpBuf, DWORD dwCount, OVERLAPPED& overlapped, DWORD* pBytesRead=NULL);
+  void  ReadEx(void* lpBuf, DWORD dwCount);
+  DWORD Write(const void* lpBuf, DWORD dwCount);
+  BOOL  Write(const void* lpBuf, DWORD dwCount, OVERLAPPED& overlapped, DWORD* pBytesWritten=NULL);
+  void  WriteEx(const void* lpBuf, DWORD dwCount);
+  void  TransmitChar(char cChar);
+  void  GetOverlappedResult(OVERLAPPED& overlapped, DWORD& dwBytesTransferred, BOOL bWait);
+  void  CancelIo();
+  DWORD BytesWaiting();
+  BOOL  DataWaiting(DWORD dwTimeout);
+
+//Configuration Methods
+  void GetConfig(COMMCONFIG& config);
+  static void GetDefaultConfig(int nPort, COMMCONFIG& config);
+  void SetConfig(COMMCONFIG& Config);
+  static void SetDefaultConfig(int nPort, COMMCONFIG& config);
+
+//Misc RS232 Methods
+  void ClearBreak();
+  void SetBreak();
+  void ClearError(DWORD& dwErrors);
+  void GetStatus(COMSTAT& stat);
+  void GetState(DCB& dcb);
+  void SetState(DCB& dcb);
+  void Escape(DWORD dwFunc);
+  void ClearDTR();
+  void ClearRTS();
+  void SetDTR();
+  void SetRTS();
+  void SetXOFF();
+  void SetXON();
+  void GetProperties(COMMPROP& properties);
+  void GetModemStatus(DWORD& dwModemStatus);
+
+//Timeouts
+  void SetTimeouts(COMMTIMEOUTS& timeouts);
+  void GetTimeouts(COMMTIMEOUTS& timeouts);
+  void Set0Timeout();
+  void Set0WriteTimeout();
+  void Set0ReadTimeout();
+
+//Event Methods
+  void SetMask(DWORD dwMask);
+  void GetMask(DWORD& dwMask);
+  void WaitEvent(DWORD& dwMask);
+  BOOL WaitEvent(DWORD& dwMask, OVERLAPPED& overlapped);
+ 
+//Queue Methods
+  void Flush();
+  void Purge(DWORD dwFlags);
+  void TerminateOutstandingWrites();
+  void TerminateOutstandingReads();
+  void ClearWriteBuffer();
+  void ClearReadBuffer();
+  void Setup(DWORD dwInQueue, DWORD dwOutQueue);
+
+//Overridables
+  virtual void OnCompletion(DWORD dwErrorCode, DWORD dwCount, LPOVERLAPPED lpOverlapped);
+
+//Static methods
+  static void ThrowSerialException(DWORD dwError = 0);
+
+protected:
+//Typedefs
+  typedef BOOL (WINAPI CANCELIO)(HANDLE);
+  typedef CANCELIO* LPCANCELIO;
+
+//Static methods
+  static void WINAPI _OnCompletion(DWORD dwErrorCode, DWORD dwCount, LPOVERLAPPED lpOverlapped);
+
+//Member variables
+  HANDLE     m_hComm;        //Handle to the comms port
+  HANDLE     m_hEvent;       //A event handle we need for internal synchronisation
+  HINSTANCE  m_hKernel32;    //Kernel32 handle
+  LPCANCELIO m_lpfnCancelIo; //CancelIO function pointer
+};
+
+#endif //__SERIALPORT_H__
+
+
+
+App.cpp
+
+CodeSelect
+
+/*
+Module : APP.CPP
+Purpose: Provides the WinMain function for testing the serial port class
+Created: PJN / 23-05-1999
+History: None
+
+Copyright (c) 1999 by PJ Naughter. 
+All rights reserved.
+
+*/
+
+/////////////////////////////////  Includes  //////////////////////////////////
+
+#include "stdafx.h"
+#include "SerialPort.h"
+
+
+
+///////////////////////////////// Defines /////////////////////////////////////
+
+#ifdef _DEBUG
+#define new DEBUG_NEW
+#undef THIS_FILE
+static char THIS_FILE[] = __FILE__;
+#endif
+
+
+
+//////////////////////////////// Implementation ///////////////////////////////
+
+
+class CSerialPortApp : public CWinApp
+{
+public:
+  virtual BOOL InitInstance();
+};
+
+CSerialPortApp theApp;
+
+BOOL CSerialPortApp::InitInstance()
+{
+  BYTE* pBuf = new BYTE[10000];
+
+  try
+  {
+    COMMCONFIG config;
+    CSerialPort::GetDefaultConfig(1, config);
+
+    CSerialPort port;
+    port.Open(1, 1200, CSerialPort::NoParity, 8, CSerialPort::OneStopBit, CSerialPort::XonXoffFlowControl);
+
+    HANDLE hPort = port.Detach();
+    port.Attach(hPort);
+
+    DWORD dwModemStatus;
+    port.GetModemStatus(dwModemStatus);
+
+    DCB dcb;
+    port.GetState(dcb);
+
+    dcb.BaudRate = 9600;
+    port.SetState(dcb);   
+
+    DWORD dwErrors;                     
+    port.ClearError(dwErrors);
+
+    port.SetBreak();
+    port.ClearBreak();
+
+    COMSTAT stat;
+    port.GetStatus(stat);
+
+    DWORD dwBytesWaiting = port.BytesWaiting();
+    dwBytesWaiting;
+
+    COMMTIMEOUTS timeouts;
+    port.GetTimeouts(timeouts);
+
+    port.Setup(10000, 10000);
+
+    port.GetConfig(config);
+
+    config.dcb.BaudRate = 9600;
+    port.SetConfig(config);
+
+    port.Set0WriteTimeout();
+    port.Set0ReadTimeout();
+
+    char sBuf[] = "This should appear on the serial port";
+    port.Write(sBuf, (DWORD) strlen(sBuf));
+
+    DWORD dwMask;
+    port.GetMask(dwMask);
+
+    port.SetMask(EV_TXEMPTY);
+
+    //port.WaitEvent(dwMask);
+
+    port.TerminateOutstandingWrites();
+
+    port.TransmitChar('p');
+
+    port.Set0Timeout();
+
+    char sRxBuf[10];
+    DWORD dwRead = port.Read(sRxBuf, 10);
+    dwRead; //To remove unreferrenced variable in VC 6.
+
+    port.TerminateOutstandingReads();
+
+    port.ClearDTR();
+
+    port.ClearRTS();
+
+    port.SetDTR();
+
+    port.SetRTS();
+
+    port.SetXOFF();
+
+    port.SetXON();
+
+    COMMPROP properties;
+    port.GetProperties(properties);
+
+    port.ClearWriteBuffer();
+
+    port.ClearReadBuffer();
+
+    port.Flush();
+
+    port.Close();
+
+
+    //Try out the overlapped functions
+    CSerialPort port2;
+    port2.Open(1, 9600, CSerialPort::NoParity, 8, CSerialPort::OneStopBit, CSerialPort::XonXoffFlowControl, TRUE);
+
+    CEvent event(FALSE, TRUE);
+    OVERLAPPED overlapped;
+    ZeroMemory(&overlapped, sizeof(OVERLAPPED));
+    overlapped.hEvent = event;
+    if (!port2.Write(pBuf, 10000, overlapped))
+    {
+      DWORD dwBytesWritten;
+      WaitForSingleObject(event, INFINITE);
+      port2.GetOverlappedResult(overlapped, dwBytesWritten, TRUE);
+    }
+    if (!port2.Read(pBuf, 10, overlapped))
+    {
+      DWORD dwBytesRead;
+      if (WaitForSingleObject(event, 1000) == WAIT_OBJECT_0)
+      {
+        TRACE(_T("Data was read from the serial port\n"));
+        port2.GetOverlappedResult(overlapped, dwBytesRead, FALSE);
+      }
+      else
+        TRACE(_T("No data was read from the serial port\n"));
+    }
+
+    port2.SetMask(EV_TXEMPTY);
+    port2.WaitEvent(dwMask, overlapped);                 
+
+    /* for testing on NT only
+    port2.WriteEx(sBuf, strlen(sBuf));
+    SleepEx(INFINITE, TRUE);
+    port2.ReadEx(pBuf, 10);
+    SleepEx(INFINITE, TRUE);
+    */
+
+  }
+  catch (CSerialException* pEx)
+  {
+    TRACE(_T("Handle Exception, Message:%s\n"), pEx->GetErrorMessage());
+    pEx->Delete();
+  }
+
+  delete [] pBuf;
+
+  return FALSE;
+}
+
+
+
+
+
+///////////////////////////////////////////////////////
+
+#include <iostream>
+  
+struct BadValue : public std::exception {};
+    
+double divide(double a, double b) {
+    if (b == 0) {
+        throw BadValue();
+    }
+    
+    return a / b;
+}
+
+int main() {
+    try {
+        std::cout << divide(20, 5) << std::endl;
+        std::cout << divide(20, 4) << std::endl;
+        std::cout << divide(20, 3)  << std::endl;
+        std::cout << divide(20, 2) << std::endl;
+        std::cout << divide(20, 1) << std::endl;
+        std::cout << divide(20, 0) << std::endl;
+    }
+    catch (BadValue e) {
+        std::cout << "something wrong..."  << std::endl;
+    }
+    
+    return 0;
+}
+
+/* 《程式語言教學誌》的範例程式
+   http://kaiching.org/
+   檔名：u0601_2.cpp
+   功能：示範 C++ 的例外處理
+   作者：張凱慶*/
+
+
+
+
+#include <iostream>
+#include <exception>
+using namespace std;
+ 
+struct MyException : public exception
+{
+  const char * what () const throw ()
+  {
+    return "C++ Exception";
+  }
+};
+ 
+int main()
+{
+  try
+  {
+    throw MyException();
+  }
+  catch(MyException& e)
+  {
+    std::cout << "MyException caught" << std::endl;
+    std::cout << e.what() << std::endl;
+  }
+  catch(std::exception& e)
+  {
+    //其他的错误
+  }
+}
+
+
+
+
+
+
+
+

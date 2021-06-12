@@ -1,0 +1,98 @@
+//---------------------------------------------------------------------------
+
+// cl.exe /c /analyze /EHsc /W4
+#include <stdlib.h>
+#include <malloc.h>
+#define MAX_SIZE 16382
+
+void f( )
+{
+    int i;
+    char *buffer;
+
+    i = 0;
+    buffer = (char *) malloc( MAX_SIZE );
+    if (buffer != NULL)
+    {
+        buffer[0] = '\0';
+        // code...
+        free(buffer);
+    }
+}
+
+
+// 信用卡消費
+void __fastcall TForm1::Btn_FetcCreidClick(TObject *Sender)
+{
+  AnsiString sInPutData,sDttm;
+ if( !MW )
+    {
+     MemoAddLine("信用卡交易錯誤, 請先[起動 INLINE]..");
+     return;
+    }
+
+  sDttm=FormatDateTime("yyyymmddhhnnss",Now());
+
+  //sInPutData.sprintf("01234501%14s0000019999",sDttm.c_str());
+  //MW->TscQryStart(0 , 0, 0, sInPutData);      //SigOn    端末開機   OK
+
+
+  int iPaymentType, tran_cnt, addValue, Tran_sw;
+  iPaymentType=0;
+  tran_cnt=1;
+  addValue=0;
+  Tran_sw=0;           //Tran_sw:1 訓練Mode
+  iStartReadDongle=1;
+  //FETC EDC
+  //sInPutData.sprintf("%-6s%-8s%-8s%-6s%-10s%14s%6s%4s%4s",
+  //                      "009999","01","10100001","99999","XX12345678", sDttm.c_str(),
+  //                     "000500","FE01","0000"  );
+
+
+  //MW->TscQryStart(703 , Tran_sw, addValue, sInPutData.c_str() , NULL, 0);   // 信用卡查詢
+
+ // Sleep(5000);
+  addValue=3100;
+  sInPutData.sprintf("%-6s%-8s%-8s%-6s%-10s%14s%06d%4s%4s%4s%-30s",
+                        "009999","01",EdcTranNO.c_str(),"99999","XX12345678", sDttm.c_str(),
+                       addValue,"8010","0021", "0812", "405650900"  );
+  MW->TscQryStart(704 , Tran_sw, addValue, sInPutData.c_str() , NULL, 0);   // 信用卡消費
+  //009939000000022511915099999 XY0901018520200925135326000055801000300812405650900
+
+  /**/
+  int icnt=0;
+  while( iStartReadDongle==1)
+    {
+       Sleep(1); icnt++;
+       if( icnt > (1000*20) )
+         break;
+
+       Application->ProcessMessages();
+
+       if(  iStartReadDongle != 1 )
+         break;
+    }
+
+
+  //  店簽啟動
+  if( iStartReadDongle == 9 )
+   {
+     iStartReadDongle=1;
+     sInPutData.sprintf("S");
+     MW->TscQryStart(710 , Tran_sw, addValue, sInPutData.c_str() , NULL, 0);
+    }
+
+  /**/
+  while( iStartReadDongle==1)
+    {
+       Sleep(1); icnt++;
+       if( icnt > (1000*20) )
+         break;
+
+       Application->ProcessMessages();
+
+       if(  iStartReadDongle != 1 )
+         break;
+    }
+  /**/
+}

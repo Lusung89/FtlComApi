@@ -1,0 +1,18 @@
+
+
+ //if( TranModeSw || TsccOffLineApi)
+        if( TranModeSw )
+          {
+           //stmp.sprintf("TTscThread::InitComPort DeviceName=Com%d,  TranModeSw=%d, TsccOffLineApi=%d  Return OK",
+           //                          iDeviceNo, TranModeSw, TsccOffLineApi );
+  
+           stmp.sprintf("TTscThread::InitComPort DeviceName=Com%d,  TranModeSw=%d, Return OK",
+                                     iDeviceNo, TranModeSw, TsccOffLineApi );  ??????????????????????????/
+           RtnLogMsg(stmp);
+           return(0);
+          }
+
+
+
+  if( sTmpTranCode != "FE00") //信用卡交易終止
+       sTmpTranCode=="FE01";   //??????????????????????????
