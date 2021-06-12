@@ -3,3 +3,14 @@
 ################################################################################
 
 /.vs
+/Release/FtlComApi.tlog
+*.obj
+*.log
+*.recipe
+*.exp
+*.iobj
+*.ipdb
+*.lib
+*.pch
+*.pdb
+/Release/FtlComApi.vcxproj.FileListAbsolute.txt
