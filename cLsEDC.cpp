@@ -65,7 +65,7 @@ int  __fastcall cLsEDC::EDCApiComTest(int iTranType, int iAddValue, string ApiIn
 //rPtr: Response Data      去掉 STX(1), ETX(1) + LRC(2)
 //rPtrLen:  Response Data Len 去掉 STX(1), ETX(1) + LRC(2)
 //return: SUCCEED 
-
+// 2021/7/1 特別要注意 ACK 處理: RepACK  x30 -- x31 不須 ACK 否則 EDC 會無回應 TimeOut
 int __fastcall cLsEDC::HighWayEDCComm(LPSTR sPtr, int sPtrLen, LPSTR rPtr, int *rPtrLen ,int iTimeOut, bool RepACK)
 {
     int i, k, iRtn, rt1, CommTimeout, SrDataLen, iStartChar, iEndChar, recv_len;
@@ -1048,7 +1048,7 @@ int __fastcall cLsEDC::Fun_HighWayEDC_FE02(int iTranType, int iTranModeSw, int i
     //送出命令  
     //sEdcSet.TsccEnqIntervalSec  X31 TimeOut  default 3+1
     //sEdcSet.TscComReqTimeOut;   每一Pack ( STX(1)+ DATA[]+ ETX(1)+ LRC(2))  TimeOut default:30000ms
-    iRtn = HighWayEDCComm(data_0x30, 234, recv_data, &i, sEdcSet.TsccEnqIntervalSec);
+    iRtn = HighWayEDCComm(data_0x30, 234, recv_data, &i, sEdcSet.TsccEnqIntervalSec, false);  //false:for SmartPay 
     SetHostResponseCode(iRtn);
     if (iRtn == SUCCEED)
     {
