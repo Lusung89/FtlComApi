@@ -111,7 +111,7 @@ FTLCOMAPI_API int __stdcall FtlComApiTest(int TranType, int TMode, byte* InData,
     sprintf_s(cEDCHostResponseCode, "0000");
     sprintf_s(cEDCTscData, "0000");
     sprintf_s(cEDCErrMsg, "REQUEST_TEST_OK");
-    iEDCTscDataLen = 4; //0000
+    iEDCTscDataLen = 4; //0000F
    
     delete CommEDC;
 

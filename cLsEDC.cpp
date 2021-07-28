@@ -1704,6 +1704,17 @@ int __fastcall cLsEDC::HighWayEDC_42Data(int ComTimeOut, int WaitSec42TimeOut)
                 }
 
             }//if(AvailableBytes>0)
+            else  // 2021/07/28 Update
+            {
+                if (icnt > itimeoutcnt42 )
+                {
+                    rtn = DATA_ERROR;
+                    logsprintf("Dongle_Read_42Data: DATA_ERROR->No AvailableBytes -TimeOut .. icnt=%d , itimeoutcnt42=%d, iucharenqdateLen=%d",
+                        icnt, itimeoutcnt42, iucharenqdateLen);
+                    //TsccTraceLog(tmp);
+                    break;
+                }
+            }
                      
         }//if( Connected==true)
         else
