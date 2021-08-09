@@ -484,6 +484,9 @@ int __fastcall cLsEDC::Fun_HighWayEDC_Cancel(int iTranType, int iTranModeSw, int
     // 20160108  ADD %152 Byte
     // DongleApiInputData=>  DongleApiInputData.sprintf("%-6s%-8s%-8s%-6s%-10s%14s%06d%4s%04d",
     //                       sTenCode,sEcrNo,sTranNo,sSalesNo,sInvoNo, dttm, iAddValue, sTranCode, iTimeOut);
+    
+  try
+  {
     s = string(lpInData);
     sTenCode = s.substr(1, 6);
     sEcrNo = s.substr(7, 8);
@@ -500,6 +503,17 @@ int __fastcall cLsEDC::Fun_HighWayEDC_Cancel(int iTranType, int iTranModeSw, int
     sChrInvoNo = s.substr(71, 10);     //(67,4)
 
     s0X40Data = s.substr(81, 226);  // 0x40 Data  226 Byte  (77,226)
+  }
+  catch (...)
+  {
+    iTscDataLen = sizeof(data_0x40);
+    memset(ucTscData, '\0', iTscDataLen);
+    iRtn = DATA_ERROR;
+    SetHostResponseCode(iRtn);
+    logsprintf("Fun_HighWayEDC_Cancel:信用卡退貨 -> (InputData Error..) ResponseCode=%s, rtn=%d", ucHostResponseCode, iRtn);
+    return(iRtn);
+    
+  }
 
     memcpy(&InputData_0x40, s0X40Data.c_str(), sizeof(InputData_0x40));
     memcpy(&InputData_0x40_special, &InputData_0x40.field_specil, sizeof(InputData_0x40_special));    // 信用卡
