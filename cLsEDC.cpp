@@ -484,25 +484,22 @@ int __fastcall cLsEDC::Fun_HighWayEDC_Cancel(int iTranType, int iTranModeSw, int
     // 20160108  ADD %152 Byte
     // DongleApiInputData=>  DongleApiInputData.sprintf("%-6s%-8s%-8s%-6s%-10s%14s%06d%4s%04d",
     //                       sTenCode,sEcrNo,sTranNo,sSalesNo,sInvoNo, dttm, iAddValue, sTranCode, iTimeOut);
-    
+  string sChrInvoNo, s0X40Data;
   try
   {
     s = string(lpInData);
-    sTenCode = s.substr(1, 6);
-    sEcrNo = s.substr(7, 8);
-    sTranNo = s.substr(15, 8);
-    sSalesNo = s.substr(23, 6);
-    sInvoNo = s.substr(29, 10);
+    sTenCode = s.substr(0, 6);
+    sEcrNo = s.substr(6, 8);
+    sTranNo = s.substr(14, 8);
+    sSalesNo = s.substr(22, 6);
+    sInvoNo = s.substr(28, 10);
     //14
     //6
-    sTranCode = s.substr(59, 4);    //(58,4);     2013/05/22
-    sTimeOut = s.substr(63, 4);     //(62,4);
-    sTmpBankType = s.substr(67, 4);
-
-    string sChrInvoNo, s0X40Data;
-    sChrInvoNo = s.substr(71, 10);     //(67,4)
-
-    s0X40Data = s.substr(81, 226);  // 0x40 Data  226 Byte  (77,226)
+    sTranCode = s.substr(58, 4);    //(58,4);     2013/05/22
+    sTimeOut = s.substr(62, 4);     //(62,4);
+    sTmpBankType = s.substr(66, 4);
+    sChrInvoNo = s.substr(70, 10);     //(67,4)
+    s0X40Data = s.substr(80, 226);  // 0x40 Data  226 Byte  (77,226)
   }
   catch (...)
   {
